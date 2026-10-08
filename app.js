@@ -8,7 +8,7 @@
 const KEY = 'finanzas.data';
 const KEY_BAK = 'finanzas.data.bak';
 const VERSION = 1;
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 
 const INV_OUT = 'inv-out'; // categoría de sistema: aportación a inversión (gasto)
 const INV_IN = 'inv-in';   // categoría de sistema: retirada de inversión (ingreso)
@@ -232,6 +232,7 @@ function renderAdd() {
   const shown = state.amount === '' ? '0' : state.amount;
   const isToday = state.date === todayISO();
   $('#view').innerHTML = `
+    ${backupBanner()}
     <div class="seg" id="typeSeg">
       <button data-t="gasto" class="${state.addType === 'gasto' ? 'on' : ''}">Gasto</button>
       <button data-t="ingreso" class="${state.addType === 'ingreso' ? 'on' : ''}">Ingreso</button>
@@ -255,6 +256,7 @@ function renderAdd() {
     state.addType = t.dataset.t;
     renderAdd();
   };
+  bindBackupBanner();
   $('#note').oninput = e => { state.note = e.target.value; };
   $('#date').onchange = e => { state.date = e.target.value || todayISO(); renderAdd(); };
   $('#keypad').onclick = e => {
@@ -716,7 +718,27 @@ function invSheet(id) {
    Ajustes: categorías y copia de seguridad
    ========================================================= */
 
-const BACKUP_DAYS = 30;
+const BACKUP_DAYS = 14;
+const KEY_SNOOZE = 'finanzas.backupSnooze'; // aparte de los datos: cuándo se descartó el aviso
+const SNOOZE_DAYS = 3;
+function backupSnoozed() {
+  try { return Date.now() - Number(localStorage.getItem(KEY_SNOOZE) || 0) < SNOOZE_DAYS * 864e5; } catch (_) { return false; }
+}
+function backupBanner() {
+  if (!backupDue() || backupSnoozed()) return '';
+  const txt = db.lastBackup
+    ? `Llevas ${Math.floor((Date.now() - db.lastBackup) / 864e5)} días sin copia`
+    : 'Aún no has hecho ninguna copia';
+  return `<div class="banner bk-banner"><span>${txt}</span><button class="link" id="bkExp">Exportar</button><button class="bk-x" id="bkX" aria-label="Descartar">✕</button></div>`;
+}
+function bindBackupBanner() {
+  if (!$('#bkExp')) return;
+  $('#bkExp').onclick = exportData;
+  $('#bkX').onclick = () => {
+    try { localStorage.setItem(KEY_SNOOZE, String(Date.now())); } catch (_) {}
+    render();
+  };
+}
 function backupDue() {
   const hasData = db.movs.length || db.pend.length || db.invs.length;
   if (!hasData) return false;

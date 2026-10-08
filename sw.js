@@ -1,5 +1,5 @@
 // Sube CACHE en cada versión nueva para que el iPhone descargue los cambios.
-const CACHE = 'finanzas-v1.0.0';
+const CACHE = 'finanzas-v1.1.0';
 const FILES = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
