@@ -191,5 +191,8 @@ h2 { font-size: 15px; font-weight: 600; color: var(--text-2); margin: 20px 0 8px
 .toast button { color: var(--bg); font-weight: 700; text-decoration: underline; min-height: 36px; padding: 0 4px; }
 
 .banner { background: var(--card); border-left: 4px solid var(--danger); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; font-size: 14px; }
+.bk-banner { display: flex; align-items: center; gap: 4px; padding: 0 4px 0 12px; margin-bottom: 10px; }
+.bk-banner span { flex: 1; }
+.bk-x { color: var(--muted); min-width: 44px; min-height: 44px; }
 .stat { display: flex; justify-content: space-between; padding: 4px 0; }
 .stat b { font-variant-numeric: tabular-nums; }
