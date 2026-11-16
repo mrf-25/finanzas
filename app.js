@@ -7,8 +7,9 @@
 
 const KEY = 'finanzas.data';
 const KEY_BAK = 'finanzas.data.bak';
-const VERSION = 1;
-const APP_VERSION = '1.0.0';
+const VERSION = 2;
+const APP_VERSION = '1.1.0';
+const DEFAULT_INFLATION = 2.5; // % anual, editable en Inversiones
 
 const INV_OUT = 'inv-out'; // categoría de sistema: aportación a inversión (gasto)
 const INV_IN = 'inv-in';   // categoría de sistema: retirada de inversión (ingreso)
@@ -32,6 +33,8 @@ function defaultData() {
     ],
     pend: [],
     invs: [],
+    snaps: [], // valor de cada inversión mes a mes: { id, inv, ym, value, est? }
+    cfg: { inflation: DEFAULT_INFLATION },
     lastBackup: null,
   };
 }
@@ -39,7 +42,22 @@ function defaultData() {
 // Cada migración recibe datos de la versión N y devuelve la versión N+1.
 // Para cambiar la estructura: añade aquí una función y sube VERSION.
 const MIGRATIONS = {
-  // 1: d => { ...; d.version = 2; return d; },
+  // 1 → 2: historial mensual del valor de las inversiones e inflación.
+  // No se toca ningún dato existente: solo se añaden campos.
+  1: d => {
+    const movs = Array.isArray(d.movs) ? d.movs : [];
+    d.snaps = [];
+    d.cfg = { inflation: DEFAULT_INFLATION };
+    for (const inv of (Array.isArray(d.invs) ? d.invs : [])) {
+      const valueDate = inv.valueDate || todayISO();
+      let start = valueDate;
+      for (const m of movs) if (m.inv === inv.id && m.date < start) start = m.date;
+      inv.start = start.slice(0, 7); // mes desde el que cuenta lo aportado antes de la app
+      d.snaps.push({ id: uid(), inv: inv.id, ym: valueDate.slice(0, 7), value: inv.value || 0 });
+    }
+    d.version = 2;
+    return d;
+  },
 };
 
 function migrate(d) {
@@ -56,6 +74,9 @@ function migrate(d) {
   d.cats = Array.isArray(d.cats) ? d.cats : defaultData().cats;
   d.pend = Array.isArray(d.pend) ? d.pend : [];
   d.invs = Array.isArray(d.invs) ? d.invs : [];
+  d.snaps = Array.isArray(d.snaps) ? d.snaps : [];
+  if (!d.cfg || typeof d.cfg !== 'object') d.cfg = {};
+  if (typeof d.cfg.inflation !== 'number' || !isFinite(d.cfg.inflation)) d.cfg.inflation = DEFAULT_INFLATION;
   for (const sys of defaultData().cats.filter(c => c.system)) {
     if (!d.cats.some(c => c.id === sys.id)) d.cats.push(sys);
   }
@@ -71,7 +92,13 @@ function load() {
     const raw = localStorage.getItem(k);
     if (!raw) continue;
     try {
-      const d = migrate(JSON.parse(raw));
+      const parsed = JSON.parse(raw);
+      const from = (parsed && parsed.version) || 1;
+      // Antes de migrar se guarda una copia intacta de los datos tal como estaban.
+      if (from < VERSION && !localStorage.getItem(`${KEY}.v${from}`)) {
+        try { localStorage.setItem(`${KEY}.v${from}`, raw); } catch (_) { /* sin espacio: save() conserva igualmente la versión anterior en .bak */ }
+      }
+      const d = migrate(parsed);
       if (validShape(d)) return d;
       throw new Error('estructura no válida');
     } catch (e) {
@@ -180,6 +207,12 @@ function openSheet(html, bind) {
   sh.innerHTML = html;
   bd.hidden = false;
   bd.onclick = e => { if (e.target === bd) closeSheet(); };
+  // Con teclado físico: Intro en un campo pulsa el botón principal de la hoja.
+  sh.onkeydown = e => {
+    if (e.key !== 'Enter' || !e.target.matches('input')) return;
+    const b = sh.querySelector(e.target.dataset.enter || '.btn:not(.secondary):not(.danger)');
+    if (b) { e.preventDefault(); b.click(); }
+  };
   bind && bind(sh);
 }
 function closeSheet() {
@@ -206,6 +239,7 @@ const state = {
   date: todayISO(),
   month: monthOf(todayISO()),
   listType: 'gasto',
+  invSel: null, // mes señalado en el gráfico de inversiones
 };
 
 const views = { add: renderAdd, month: renderMonth, pend: renderPend, inv: renderInv, set: renderSet };
@@ -217,8 +251,10 @@ function go(tab) {
   window.scrollTo(0, 0);
 }
 function render() {
+  $('#view').dataset.tab = state.tab;
   views[state.tab]();
   updateBackupDot();
+  $('#invDot').hidden = !invsMissing().length;
 }
 document.querySelectorAll('.tabbar button').forEach(b => b.addEventListener('click', () => go(b.dataset.tab)));
 
@@ -293,6 +329,19 @@ function pressKey(k) {
     (has ? 'Toca una categoría para guardar' : 'Escribe el importe') + (isToday ? '' : ' · ' + dayLabel(state.date));
 }
 
+// En el ordenador el importe también se puede escribir con el teclado.
+document.addEventListener('keydown', e => {
+  const sheetOpen = !$('#sheetBackdrop').hidden;
+  if (e.key === 'Escape' && sheetOpen) { closeSheet(); return; }
+  if (state.tab !== 'add' || sheetOpen || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+  if (/^\d$/.test(e.key)) pressKey(e.key);
+  else if (e.key === ',' || e.key === '.') pressKey(',');
+  else if (e.key === 'Backspace') pressKey('⌫');
+  else return;
+  e.preventDefault();
+});
+
 function addMov(m) {
   const mov = { id: uid(), created: Date.now(), ...m };
   db.movs.push(mov);
@@ -352,6 +401,8 @@ function renderMonth() {
       <div><div class="lbl"><i class="sw" style="background:var(--gasto)"></i>Gastos</div><div class="val num">${fmt(t.gas)}</div></div>
     </div>
 
+    <div class="cols">
+    <div class="col">
     <h2>Últimos 6 meses</h2>
     <div class="card chart">${barChart(ym)}
       <div class="legend"><span><i class="sw" style="background:var(--ingreso)"></i>Ingresos</span><span><i class="sw" style="background:var(--gasto)"></i>Gastos</span></div>
@@ -367,6 +418,8 @@ function renderMonth() {
         </div>`).join('') : '<div class="muted">Sin gastos este mes.</div>'}
     </div>
 
+    </div>
+    <div class="col">
     <h2>Movimientos</h2>
     <div class="seg" id="listSeg">
       <button data-t="gasto" class="${state.listType === 'gasto' ? 'on' : ''}">Gastos</button>
@@ -378,6 +431,8 @@ function renderMonth() {
           <div class="main"><div class="t">${esc(catName(m.cat))}</div><div class="s">${esc(dayLabel(m.date))}${m.note ? ' · ' + esc(m.note) : ''}</div></div>
           <div class="a">${m.type === 'gasto' ? '−' : '+'}${fmt(m.amount)}</div>
         </button>`).join('') : `<div class="empty-state">No hay ${state.listType === 'gasto' ? 'gastos' : 'ingresos'} este mes.</div>`}
+    </div>
+    </div>
     </div>`;
 
   $('#prevM').onclick = () => { state.month = shiftMonth(ym, -1); renderMonth(); };
@@ -433,13 +488,6 @@ function barChart(ym) {
   return svg + '</svg>';
 }
 
-// Si un movimiento de inversión cambia, el valor de la inversión se ajusta igual.
-function adjustInv(m, delta) {
-  if (!m.inv || !delta) return;
-  const inv = db.invs.find(i => i.id === m.inv);
-  if (inv) inv.value = Math.max(0, inv.value + (m.type === 'gasto' ? delta : -delta));
-}
-
 function editMov(id) {
   const m = db.movs.find(x => x.id === id);
   if (!m) return;
@@ -448,7 +496,7 @@ function editMov(id) {
     <h3>Editar ${m.type === 'gasto' ? 'gasto' : 'ingreso'}</h3>
     <label class="field"><span>Importe (€)</span><input id="eAmt" inputmode="decimal" value="${centsToInput(m.amount)}"></label>
     <label class="field"><span>Categoría</span><select id="eCat" ${isInv ? 'disabled' : ''}>${catOptions(m.type, m.cat)}</select></label>
-    ${isInv ? '<p class="small muted">Movimiento de inversión: la categoría no se puede cambiar.</p>' : ''}
+    ${isInv ? '<p class="small muted">Movimiento de inversión: la categoría no se puede cambiar. El valor de la inversión no varía; si hace falta, corrígelo en Inversiones.</p>' : ''}
     <label class="field"><span>Nota</span><input id="eNote" value="${esc(m.note || '')}"></label>
     <label class="field"><span>Fecha</span><input id="eDate" type="date" value="${m.date}"></label>
     <button class="btn" id="eSave">Guardar</button>
@@ -457,7 +505,6 @@ function editMov(id) {
       const a = parseAmount(sh.querySelector('#eAmt').value);
       if (!(a > 0)) { alert('Importe no válido'); return; }
       const before = { ...m };
-      adjustInv(m, a - m.amount);
       m.amount = a;
       if (!isInv) m.cat = sh.querySelector('#eCat').value;
       m.note = sh.querySelector('#eNote').value.trim();
@@ -469,11 +516,10 @@ function editMov(id) {
     sh.querySelector('#eDel').onclick = () => {
       const idx = db.movs.indexOf(m);
       db.movs.splice(idx, 1);
-      adjustInv(m, -m.amount);
       save();
       closeSheet();
       render();
-      toast('Movimiento borrado', 'Deshacer', () => { db.movs.splice(idx, 0, m); adjustInv(m, m.amount); save(); render(); });
+      toast('Movimiento borrado', 'Deshacer', () => { db.movs.splice(idx, 0, m); save(); render(); });
     };
   });
 }
@@ -494,15 +540,23 @@ function renderPend() {
     </button>`;
   $('#view').innerHTML = `
     <h1>Pendiente</h1>
+    <div class="head">
     <div class="card">
       <div class="stat"><span>Te deben</span><b>${fmt(meDeben)}</b></div>
       <div class="stat"><span>Debes</span><b>${fmt(debo)}</b></div>
     </div>
     <button class="btn" id="newPend">Añadir pendiente</button>
+    </div>
+    <div class="cols">
+    <div class="col">
     <h2>Te deben</h2>
     <div class="list pl">${open.filter(p => p.dir === 'meDeben').map(item).join('') || '<div class="empty-state">Nadie te debe nada.</div>'}</div>
+    </div>
+    <div class="col">
     <h2>Debes</h2>
     <div class="list pl">${open.filter(p => p.dir === 'debo').map(item).join('') || '<div class="empty-state">No debes nada.</div>'}</div>
+    </div>
+    </div>
     ${done.length ? `<h2>Saldados recientes</h2><div class="list pl">${done.map(item).join('')}</div>` : ''}`;
   $('#newPend').onclick = () => editPend(null);
   document.querySelectorAll('.pl').forEach(l => l.onclick = e => {
@@ -593,60 +647,190 @@ function settlePend(p) {
 /* =========================================================
    Inversiones
    Aportar = gasto (categoría Inversiones). Retirar = ingreso.
-   Rentabilidad = valor actual + retirado − (aportado antes de la app + aportado)
+   Cada mes se apunta el valor actual; con eso y la inflación se calcula
+   si la inversión conserva su poder adquisitivo (ver calc.js).
    ========================================================= */
 
+const curYM = () => monthOf(todayISO());
+const monthName = ym => monthLabel(ym, { month: 'long' }).toLowerCase();
+const pctPlain = new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 });
+
+// Guarda el valor de una inversión y lo anota en el historial del mes en curso.
+// est = valor estimado por la app (tras una retirada), no apuntado por ti.
+function setInvValue(inv, value, est) {
+  inv.value = value;
+  inv.valueDate = todayISO();
+  const ym = curYM();
+  const s = db.snaps.find(x => x.inv === inv.id && x.ym === ym);
+  if (s) { s.value = value; if (!est) delete s.est; }
+  else db.snaps.push({ id: uid(), inv: inv.id, ym, value, ...(est ? { est: true } : {}) });
+}
+const hasMonthValue = inv => db.snaps.some(s => s.inv === inv.id && s.ym === curYM() && !s.est);
+const invsMissing = () => db.invs.filter(i => !i.archived && !hasMonthValue(i));
+
 function invStats(inv) {
-  let aport = inv.prev || 0, ret = 0;
-  for (const m of db.movs) {
-    if (m.inv !== inv.id) continue;
-    if (m.type === 'gasto') aport += m.amount; else ret += m.amount;
-  }
-  const gain = inv.value + ret - aport;
-  return { aport, ret, gain, rate: aport > 0 ? gain / aport : 0 };
+  return Calc.stats(Calc.invFlows(inv, db.movs), inv.value, curYM(), db.cfg.inflation);
 }
 
+const LIGHTS = {
+  verde: { icon: '✓', text: 'Vas bien: ganas a la inflación' },
+  ambar: { icon: '!', text: 'Ganas dinero, pero menos que la inflación' },
+  rojo: { icon: '↓', text: 'Tu inversión vale menos de lo aportado' },
+};
+const rentTxt = r => (r === null ? '—' : pct.format(r));
+
 function renderInv() {
+  const ym = curYM();
   const invs = db.invs.filter(i => !i.archived);
-  const tot = invs.reduce((s, i) => {
-    const st = invStats(i);
-    s.value += i.value; s.aport += st.aport; s.gain += st.gain;
-    return s;
-  }, { value: 0, aport: 0, gain: 0 });
+  const missing = invsMissing();
+
+  if (!invs.length) {
+    $('#view').innerHTML = `
+      <h1>Inversiones</h1>
+      <div class="card">
+        <p style="margin-top:0">Añade tu fondo y apunta cada mes dos cosas: lo que aportas y lo que vale. La app te dirá si tu dinero gana a la inflación.</p>
+        <button class="btn" id="newInv">Añadir mi primera inversión</button>
+      </div>`;
+    $('#newInv').onclick = newInv;
+    return;
+  }
+
+  const t = Calc.totals(invs, db.movs, ym, db.cfg.inflation);
+  const L = LIGHTS[t.luz];
+  const serie = Calc.series(invs, db.movs, db.snaps, db.cfg.inflation);
+  const sel = serie.find(p => p.ym === state.invSel) || serie[serie.length - 1];
+
+  // Enlace con el resto de la app: lo que sobra este mes y lo que se ha invertido.
+  let ing = 0, gas = 0, aportMes = 0;
+  for (const m of db.movs) {
+    if (monthOf(m.date) !== ym) continue;
+    if (m.cat === INV_OUT) aportMes += m.amount;
+    else if (m.cat === INV_IN) continue;
+    else if (m.type === 'ingreso') ing += m.amount;
+    else gas += m.amount;
+  }
+  const ahorro = ing - gas;
+
   $('#view').innerHTML = `
     <h1>Inversiones</h1>
-    <div class="card">
-      <div class="lbl small muted">Valor actual</div>
-      <div style="font-size:32px;font-weight:700" class="num">${fmt(tot.value)}</div>
-      <div class="stat"><span>Aportado</span><b>${fmt(tot.aport)}</b></div>
-      <div class="stat"><span>Rentabilidad</span><b>${fmtSigned(tot.gain)} (${pct.format(tot.aport ? tot.gain / tot.aport : 0)})</b></div>
-    </div>
-    <button class="btn" id="newInv">Nueva inversión</button>
-    <h2>Mis inversiones</h2>
-    <div class="list" id="invList">
-      ${invs.length ? invs.map(i => {
-        const st = invStats(i);
-        return `<button class="li" data-id="${i.id}">
-          <div class="main"><div class="t">${esc(i.name)}</div><div class="s">Valor a ${esc(dayLabel(i.valueDate))} · aportado ${fmt(st.aport)}</div></div>
-          <div style="text-align:right"><div class="a">${fmt(i.value)}</div><div class="s small muted num">${fmtSigned(st.gain)} · ${pct.format(st.rate)}</div></div>
-        </button>`;
-      }).join('') : '<div class="empty-state">Añade tu primera inversión.</div>'}
-    </div>
-    <p class="small muted">Las aportaciones cuentan como gasto en el balance del mes y las retiradas como ingreso. El valor actual lo actualizas tú.</p>`;
+    ${missing.length ? `<div class="banner warn">
+      <div>Falta el valor de ${esc(monthName(ym))}${invs.length > 1 ? ' de ' + esc(missing.map(i => i.name).join(', ')) : ''}.</div>
+      <button class="link" id="fillNow">Apuntar ahora</button>
+    </div>` : ''}
+    <div class="cols">
+      <div class="col">
+        <h2>¿Voy bien?</h2>
+        <div class="card">
+          ${L ? `<div class="light ${t.luz}"><i aria-hidden="true">${L.icon}</i><span>${L.text}</span></div>` : ''}
+          <div class="lbl small muted">Ganancia real, descontada la inflación</div>
+          <div class="bigfig num">${fmtSigned(t.gananciaReal)} <span class="rent">${rentTxt(t.rentReal)}</span></div>
+          <div class="stat"><span>Aportado</span><b>${fmt(t.aportado)}</b></div>
+          <div class="stat"><span>Valor actual</span><b>${fmt(t.valor)}</b></div>
+          <div class="stat"><span>Ganancia</span><b>${fmtSigned(t.ganancia)} (${rentTxt(t.rentNominal)})</b></div>
+          <div class="stat"><span>Lo que se come la inflación</span><b>${fmtSigned(-t.inflacion)}</b></div>
+          <div class="stat"><span>Valor real</span><b>${fmt(t.valorReal)}</b></div>
+          <div class="stat sep"><span>Inflación anual</span><button class="link" id="setInfl">${pctPlain.format(db.cfg.inflation)} % · Cambiar</button></div>
+        </div>
+        <h2>${esc(monthLabel(ym, { month: 'long' }))}</h2>
+        <div class="card">
+          <div class="stat"><span>Ahorro antes de invertir</span><b>${fmtSigned(ahorro)}</b></div>
+          <div class="stat"><span>Aportado a inversión</span><b>${fmt(aportMes)}</b></div>
+          <div class="small muted">Ingresos menos gastos del mes, sin contar inversiones.</div>
+        </div>
+      </div>
+      <div class="col">
+        <h2>Aportado y valor real</h2>
+        <div class="card chart">
+          ${serie.length ? lineChart(serie, sel.ym) : ''}
+          <div class="legend"><span><i class="sw" style="background:var(--accent)"></i>Valor real</span><span><i class="sw dash"></i>Aportado</span></div>
+          <div class="small muted" style="margin-top:4px">${sel ? `${esc(monthLabel(sel.ym))}: aportado ${fmt(sel.aportado)}, valor real ${fmt(sel.valorReal)} (${fmtSigned(sel.valorReal - sel.aportado)}).` : ''}${serie.length < 2 ? ' La línea aparecerá cuando apuntes el segundo mes.' : ''}</div>
+        </div>
+        <h2>Mis inversiones</h2>
+        <div class="list" id="invList">
+          ${invs.map(i => {
+            const st = invStats(i);
+            return `<button class="li" data-id="${i.id}">
+              <div class="main"><div class="t">${esc(i.name)}</div><div class="s">${hasMonthValue(i) ? `Valor a ${esc(dayLabel(i.valueDate))}` : `Falta el valor de ${esc(monthName(ym))}`} · aportado ${fmt(st.aportado)}</div></div>
+              <div style="text-align:right"><div class="a">${fmt(i.value)}</div><div class="s small muted num">${fmtSigned(st.gananciaReal)} real</div></div>
+            </button>`;
+          }).join('')}
+        </div>
+        <button class="link" id="newInv">+ Nueva inversión</button>
+        <p class="small muted">Las aportaciones cuentan como gasto en el balance del mes y las retiradas como ingreso. El valor actual lo apuntas tú.</p>
+      </div>
+    </div>`;
+
   $('#newInv').onclick = newInv;
+  const fill = $('#fillNow');
+  if (fill) fill.onclick = () => invSheet(missing[0].id);
+  $('#setInfl').onclick = editInflation;
   $('#invList').onclick = e => {
     const b = e.target.closest('.li');
     if (b) invSheet(b.dataset.id);
   };
+  document.querySelectorAll('.chart [data-m]').forEach(r => r.addEventListener('click', () => {
+    state.invSel = r.dataset.m;
+    renderInv();
+  }));
+}
+
+// Líneas de aportado y valor real, un punto por mes.
+function lineChart(serie, selYm) {
+  const W = 340, H = 180, top = 12, bottom = 22, left = 4, right = 4;
+  const ph = H - top - bottom, pw = W - left - right;
+  const vals = serie.flatMap(p => [p.aportado, p.valorReal]);
+  // Escala con números redondos (1, 2 o 5 × 10ⁿ euros por tramo)
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const rough = Math.max(100, (hi - lo) / 2);
+  const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  const step = [1, 2, 5, 10].map(k => k * mag).find(v => v >= rough);
+  const min = Math.max(0, Math.floor((lo - step * 0.1) / step) * step);
+  const max = Math.max(min + step, Math.ceil((hi + step * 0.1) / step) * step);
+  const n = serie.length;
+  const x = i => (n === 1 ? left + pw / 2 : left + 14 + (pw - 28) * i / (n - 1));
+  const y = v => top + ph - ((v - min) / (max - min)) * ph;
+  const path = key => serie.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`).join(' ');
+  const short = c => eur.format(c / 100).replace(/,00/, '');
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Evolución de lo aportado y del valor real">`;
+  [0, 0.5, 1].forEach(f => { const yy = top + ph - ph * f; svg += `<line class="grid" x1="${left}" x2="${W - right}" y1="${yy}" y2="${yy}"/>`; });
+  svg += `<text class="axis" x="${left}" y="${top - 3}" font-size="10">${esc(short(max))}</text>`;
+  svg += `<text class="axis" x="${left}" y="${top + ph - 4}" font-size="10">${esc(short(min))}</text>`;
+  const slot = n === 1 ? pw : (pw - 28) / (n - 1);
+  const selI = serie.findIndex(p => p.ym === selYm);
+  if (selI >= 0) svg += `<line class="selx" x1="${x(selI)}" x2="${x(selI)}" y1="${top}" y2="${top + ph}"/>`;
+  // El valor real debajo y lo aportado encima, a trazos, para que se distingan cuando casi coinciden.
+  if (n > 1) svg += `<path class="line-v" d="${path('valorReal')}"/><path class="line-a" d="${path('aportado')}"/>`;
+  const every = Math.ceil(n / 6);
+  serie.forEach((p, i) => {
+    if (n <= 12 || i === selI) svg += `<circle class="dot-v" cx="${x(i)}" cy="${y(p.valorReal)}" r="3.5"/><circle class="dot-a" cx="${x(i)}" cy="${y(p.aportado)}" r="2"/>`;
+    if ((n - 1 - i) % every === 0) svg += `<text class="axis" x="${x(i)}" y="${H - 6}" text-anchor="middle">${esc(monthLabel(p.ym, { month: 'short' }).replace('.', ''))}</text>`;
+    svg += `<rect class="hit" data-m="${p.ym}" x="${x(i) - slot / 2}" y="0" width="${slot}" height="${H}"><title>${esc(monthLabel(p.ym))}: aportado ${fmt(p.aportado)}, valor real ${fmt(p.valorReal)}</title></rect>`;
+  });
+  return svg + '</svg>';
+}
+
+function editInflation() {
+  openSheet(`
+    <h3>Inflación anual</h3>
+    <label class="field"><span>Inflación anual estimada (%)</span><input id="fInfl" inputmode="decimal" value="${String(db.cfg.inflation).replace('.', ',')}"></label>
+    <p class="small muted">Se aplica a cada aportación desde el mes en que la hiciste. Pon la media que esperas, no el dato de un mes concreto.</p>
+    <button class="btn" id="fSave">Guardar</button>`, sh => {
+    sh.querySelector('#fSave').onclick = () => {
+      const v = parseFloat(sh.querySelector('#fInfl').value.trim().replace(',', '.').replace('%', ''));
+      if (!isFinite(v) || v < -10 || v > 50) { alert('Pon un porcentaje entre −10 y 50'); return; }
+      db.cfg.inflation = Math.round(v * 100) / 100;
+      save(); closeSheet(); render();
+    };
+  });
 }
 
 function newInv() {
   openSheet(`
     <h3>Nueva inversión</h3>
-    <label class="field"><span>Nombre</span><input id="iName" placeholder="Fondo indexado, Bitcoin…" autocomplete="off"></label>
+    <label class="field"><span>Nombre</span><input id="iName" placeholder="Fondo indexado global…" autocomplete="off"></label>
     <label class="field"><span>Ya aportado antes de usar la app (€)</span><input id="iPrev" inputmode="decimal" placeholder="0"></label>
     <label class="field"><span>Valor actual (€)</span><input id="iVal" inputmode="decimal" placeholder="0"></label>
-    <p class="small muted">Lo aportado antes no cuenta como gasto de este mes. Las aportaciones nuevas, hazlas desde la inversión.</p>
+    <p class="small muted">Si empiezas ahora, deja los dos importes en blanco. Lo aportado antes no cuenta como gasto de este mes.</p>
     <button class="btn" id="iSave">Crear</button>`, sh => {
     sh.querySelector('#iSave').onclick = () => {
       const name = sh.querySelector('#iName').value.trim();
@@ -656,51 +840,74 @@ function newInv() {
       const value = valS ? parseAmount(valS) : prev;
       if (!name) { alert('Ponle un nombre'); return; }
       if (isNaN(prev) || isNaN(value)) { alert('Importe no válido'); return; }
-      db.invs.push({ id: uid(), name, prev, value, valueDate: todayISO(), archived: false });
+      const inv = { id: uid(), name, prev, value, valueDate: todayISO(), start: curYM(), archived: false };
+      db.invs.push(inv);
+      const empty = !prev && !value;
+      if (!empty) setInvValue(inv, value);
       save(); closeSheet(); render();
+      if (empty) invSheet(inv.id); // si empieza de cero, pasa directo al primer apunte
     };
   });
 }
 
+// Apunte mensual: dos campos (aportación y valor actual) y guardar.
 function invSheet(id) {
   const inv = db.invs.find(i => i.id === id);
   if (!inv) return;
+  const ym = curYM();
   const st = invStats(inv);
+  const aports = db.movs.filter(m => m.inv === inv.id && m.type === 'gasto')
+    .sort((a, b) => a.date.localeCompare(b.date) || (a.created || 0) - (b.created || 0));
+  const thisMonth = aports.filter(m => monthOf(m.date) === ym).reduce((s, m) => s + m.amount, 0);
+  const last = aports[aports.length - 1];
+  const prefill = !thisMonth && last ? centsToInput(last.amount) : '';
   openSheet(`
     <h3>${esc(inv.name)}</h3>
-    <div class="card">
+    <p class="muted" style="margin-top:-6px">Apunte de ${esc(monthName(ym))}${hasMonthValue(inv) ? ' · valor ya apuntado el ' + esc(dayLabel(inv.valueDate)) : ''}</p>
+    <label class="field"><span>Aportación de este mes (€)</span><input id="mAp" inputmode="decimal" value="${prefill}" placeholder="0,00" autocomplete="off"></label>
+    ${thisMonth ? `<p class="small muted" style="margin-top:-6px">Este mes ya has aportado ${fmt(thisMonth)}. Lo que pongas aquí se suma.</p>` : ''}
+    <label class="field"><span>Valor actual (€)</span><input id="mVal" inputmode="decimal" placeholder="${centsToInput(inv.value)}" autocomplete="off"></label>
+    <button class="btn" id="mSave">Guardar</button>
+    <div class="card" style="margin-top:16px">
+      <div class="stat"><span>Aportado</span><b>${fmt(st.aportado)}</b></div>
       <div class="stat"><span>Valor actual</span><b>${fmt(inv.value)}</b></div>
-      <div class="stat"><span>Aportado</span><b>${fmt(st.aport)}</b></div>
-      ${st.ret ? `<div class="stat"><span>Retirado</span><b>${fmt(st.ret)}</b></div>` : ''}
-      <div class="stat"><span>Rentabilidad</span><b>${fmtSigned(st.gain)} (${pct.format(st.rate)})</b></div>
+      <div class="stat"><span>Ganancia</span><b>${fmtSigned(st.ganancia)} (${rentTxt(st.rentNominal)})</b></div>
+      <div class="stat"><span>Ganancia real</span><b>${fmtSigned(st.gananciaReal)} (${rentTxt(st.rentReal)})</b></div>
     </div>
-    <label class="field"><span>Actualizar valor actual (€)</span><input id="vVal" inputmode="decimal" placeholder="${centsToInput(inv.value)}"></label>
-    <button class="btn" id="vSave">Guardar valor</button>
-    <label class="field" style="margin-top:16px"><span>Aportar o retirar (€)</span><input id="vAmt" inputmode="decimal" placeholder="0,00"></label>
-    <div class="row">
-      <button class="btn" id="vAdd">Aportar</button>
-      <button class="btn secondary" id="vOut" style="margin-top:0">Retirar</button>
-    </div>
-    <p class="small muted">Al aportar o retirar, el valor actual se ajusta en la misma cantidad.</p>
-    <button class="btn secondary" id="vRen" style="margin-top:12px">Renombrar</button>
-    <button class="btn danger" id="vDel">Quitar de la lista</button>`, sh => {
-    sh.querySelector('#vSave').onclick = () => {
-      const v = parseAmount(sh.querySelector('#vVal').value);
-      if (isNaN(v)) { alert('Importe no válido'); return; }
-      inv.value = v; inv.valueDate = todayISO();
-      save(); closeSheet(); render(); toast('Valor actualizado');
+    <details class="more">
+      <summary>Más opciones</summary>
+      <label class="field"><span>Retirar dinero (€)</span><input id="vOutAmt" inputmode="decimal" placeholder="0,00" data-enter="#vOut"></label>
+      <button class="btn secondary" id="vOut">Retirar</button>
+      <p class="small muted">La retirada cuenta como ingreso del mes y se resta del valor actual.</p>
+      <button class="btn secondary" id="vRen">Renombrar</button>
+      <button class="btn danger" id="vDel">Quitar de la lista</button>
+    </details>`, sh => {
+    sh.querySelector('#mSave').onclick = () => {
+      const apS = sh.querySelector('#mAp').value.trim();
+      const valS = sh.querySelector('#mVal').value.trim();
+      const ap = apS ? parseAmount(apS) : 0;
+      if (isNaN(ap)) { alert('Aportación no válida'); return; }
+      if (!valS) { alert('Indica el valor actual de la inversión'); sh.querySelector('#mVal').focus(); return; }
+      const val = parseAmount(valS);
+      if (isNaN(val)) { alert('Valor no válido'); return; }
+      const before = JSON.stringify(db);
+      if (ap > 0) db.movs.push({ id: uid(), created: Date.now(), type: 'gasto', amount: ap, cat: INV_OUT, note: inv.name, date: todayISO(), inv: inv.id });
+      setInvValue(inv, val);
+      if (!save()) { db = JSON.parse(before); return; }
+      closeSheet(); render();
+      toast(ap > 0 ? `Apuntado: ${fmt(ap)} aportados, valor ${fmt(val)}` : `Valor apuntado: ${fmt(val)}`, 'Deshacer', () => {
+        db = JSON.parse(before); save(); render(); toast('Deshecho');
+      });
     };
-    const move = type => {
-      const a = parseAmount(sh.querySelector('#vAmt').value);
+    sh.querySelector('#vOut').onclick = () => {
+      const a = parseAmount(sh.querySelector('#vOutAmt').value);
       if (!(a > 0)) { alert('Importe no válido'); return; }
-      if (type === 'ingreso' && a > inv.value) { alert('No puedes retirar más del valor actual'); return; }
-      db.movs.push({ id: uid(), created: Date.now(), type, amount: a, cat: type === 'gasto' ? INV_OUT : INV_IN, note: inv.name, date: todayISO(), inv: inv.id });
-      inv.value += type === 'gasto' ? a : -a;
+      if (a > inv.value) { alert('No puedes retirar más del valor actual'); return; }
+      db.movs.push({ id: uid(), created: Date.now(), type: 'ingreso', amount: a, cat: INV_IN, note: inv.name, date: todayISO(), inv: inv.id });
+      setInvValue(inv, inv.value - a, true);
       save(); closeSheet(); render();
-      toast(type === 'gasto' ? `Aportados ${fmt(a)}` : `Retirados ${fmt(a)}`);
+      toast(`Retirados ${fmt(a)}`);
     };
-    sh.querySelector('#vAdd').onclick = () => move('gasto');
-    sh.querySelector('#vOut').onclick = () => move('ingreso');
     sh.querySelector('#vRen').onclick = () => {
       const n = prompt('Nuevo nombre', inv.name);
       if (n && n.trim()) { inv.name = n.trim(); save(); closeSheet(); render(); }
@@ -709,6 +916,8 @@ function invSheet(id) {
       if (!confirm('¿Quitar esta inversión de la lista? Sus aportaciones seguirán contando en el balance de cada mes.')) return;
       inv.archived = true; save(); closeSheet(); render();
     };
+    // En el móvil el cursor va directo al valor, que es lo único que hay que escribir casi siempre.
+    sh.querySelector(prefill || thisMonth ? '#mVal' : '#mAp').focus();
   });
 }
 
@@ -730,20 +939,28 @@ function renderSet() {
   $('#view').innerHTML = `
     <h1>Ajustes</h1>
     ${backupDue() ? `<div class="banner">${db.lastBackup ? `Tu última copia es del ${esc(new Date(db.lastBackup).toLocaleDateString('es-ES'))}.` : 'Aún no has hecho ninguna copia.'} Exporta una ahora para no perder tus datos.</div>` : ''}
+    <div class="cols three">
+    <div class="col">
     <h2>Copia de seguridad</h2>
     <div class="card">
-      <p class="small muted" style="margin-top:0">Los datos solo están en este iPhone. Guarda la copia en Archivos o iCloud Drive.</p>
+      <p class="small muted" style="margin-top:0">Los datos solo están en este dispositivo. Guarda la copia en Archivos o iCloud Drive.</p>
       <button class="btn" id="exp">Exportar copia</button>
       <button class="btn secondary" id="imp">Importar copia</button>
       <input type="file" id="impFile" accept="application/json,.json" hidden>
       <p class="small muted" style="margin-bottom:0">Última copia: ${db.lastBackup ? esc(new Date(db.lastBackup).toLocaleString('es-ES')) : 'nunca'}</p>
     </div>
+    </div>
+    <div class="col">
     <h2>Categorías de gasto</h2>
     <div class="list catl">${catList('gasto')}</div>
     <button class="link" data-add="gasto">+ Añadir categoría de gasto</button>
+    </div>
+    <div class="col">
     <h2>Categorías de ingreso</h2>
     <div class="list catl">${catList('ingreso')}</div>
     <button class="link" data-add="ingreso">+ Añadir categoría de ingreso</button>
+    </div>
+    </div>
     <p class="small muted" style="margin-top:24px">Versión ${APP_VERSION} · ${db.movs.length} movimientos guardados</p>`;
 
   $('#exp').onclick = exportData;

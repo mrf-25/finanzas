@@ -20,6 +20,7 @@
   <main id="view"></main>
 
   <nav class="tabbar" id="tabbar">
+    <div class="brand">Finanzas</div>
     <button data-tab="add" class="active" aria-label="Añadir">
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>Añadir</span>
     </button>
@@ -30,7 +31,7 @@
       <svg viewBox="0 0 24 24"><path d="M7 7h11l-3-3M17 17H6l3 3"/></svg><span>Pendiente</span>
     </button>
     <button data-tab="inv" aria-label="Inversiones">
-      <svg viewBox="0 0 24 24"><path d="M4 17l5-5 4 4 7-8M15 8h5v5"/></svg><span>Inversiones</span>
+      <svg viewBox="0 0 24 24"><path d="M4 17l5-5 4 4 7-8M15 8h5v5"/></svg><span>Inversiones</span><i class="dot" id="invDot" hidden></i>
     </button>
     <button data-tab="set" aria-label="Ajustes">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg><span>Ajustes</span><i class="dot" id="backupDot" hidden></i>
@@ -42,6 +43,7 @@
   </div>
   <div class="toast" id="toast" hidden></div>
 
+  <script src="calc.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
