@@ -223,9 +223,11 @@ function enter(cls) {
   countUp(v);
   clearTimeout(enterTimer);
   enterTimer = setTimeout(off, 1800);
-  // Si se toca algo antes de que acabe, lo siguiente que se pinte ya no se anima.
-  addEventListener('pointerdown', off, { once: true, capture: true });
 }
+// Al volver a pintar una pantalla (p. ej. tras pulsar una tecla) no se repite la entrada.
+// Se quita aquí y no al tocar: si se quitara al tocar, todo saltaría a su sitio bajo
+// el dedo y el toque acabaría en otro botón.
+const calm = () => $('#view').classList.remove('enter', 'slide-l', 'slide-r');
 
 // Confeti en amarillo, blanco y gris desde un punto de la pantalla.
 const fx = { parts: [], raf: 0 };
@@ -398,6 +400,7 @@ document.querySelectorAll('.tabbar button').forEach(b => b.addEventListener('cli
    ========================================================= */
 
 function renderAdd() {
+  calm();
   const cents = parseAmount(state.amount || '0');
   const has = state.amount !== '' && cents > 0;
   const shown = state.amount === '' ? '0' : state.amount;
@@ -513,6 +516,7 @@ function monthTotals(ym) {
 }
 
 function renderMonth() {
+  calm();
   const ym = state.month;
   const cur = monthOf(todayISO());
   const t = monthTotals(ym);
@@ -668,6 +672,7 @@ function editMov(id) {
    ========================================================= */
 
 function renderPend() {
+  calm();
   const open = db.pend.filter(p => !p.settled).sort((a, b) => b.date.localeCompare(a.date));
   const done = db.pend.filter(p => p.settled).sort((a, b) => b.settled.localeCompare(a.settled)).slice(0, 10);
   const meDeben = open.filter(p => p.dir === 'meDeben').reduce((s, p) => s + p.amount, 0);
@@ -819,6 +824,7 @@ const LIGHTS = {
 const rentTxt = r => (r === null ? '—' : pct.format(r));
 
 function renderInv() {
+  calm();
   const ym = curYM();
   const invs = db.invs.filter(i => !i.archived);
   const missing = invsMissing();
@@ -1078,6 +1084,7 @@ function backupDue() {
 function updateBackupDot() { $('#backupDot').hidden = !backupDue(); }
 
 function renderSet() {
+  calm();
   const catList = type => activeCats(type).map(c => `
     <button class="li" data-id="${c.id}"><div class="main"><div class="t">${esc(c.name)}</div></div><span class="muted">›</span></button>`).join('');
   $('#view').innerHTML = `
