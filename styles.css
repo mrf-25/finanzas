@@ -293,6 +293,24 @@ h2 { font-size: 19px; font-weight: 700; font-stretch: var(--wide); color: var(--
 .bigfig .rent { font-size: 15px; font-weight: 700; font-stretch: 100%; letter-spacing: 0; padding: 5px 11px; border-radius: 999px; background: color-mix(in srgb, var(--st) 22%, transparent); color: var(--st); }
 .banner.warn { box-shadow: inset 4px 0 0 var(--warn); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .banner.warn .link { white-space: nowrap; }
+
+/* Cuenta y nube */
+.btn:disabled { filter: saturate(0.4) brightness(0.7); }
+.btn:disabled:active { transform: none; }
+.cloud .link { display: block; margin: 6px auto 0; }
+.cloud-row { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.cloud-row .main { flex: 1; min-width: 0; }
+.cloud-row .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cloud-dot { flex: 0 0 12px; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); }
+.cloud-dot.ok { background: var(--ok); box-shadow: 0 0 0 4px rgba(50, 215, 75, .16); }
+.cloud-dot.warn { background: var(--warn); }
+.cloud-dot.bad { background: var(--danger); }
+.cloud-dot.busy { background: var(--accent); animation: breathe-dot 900ms ease-in-out infinite alternate; }
+@keyframes breathe-dot { from { opacity: .35; transform: scale(.8); } }
+.cloud-msg { font-size: 14px; border-radius: 14px; padding: 10px 12px; margin: 0 0 12px; background: var(--card-2); }
+.cloud-msg.bad { box-shadow: inset 3px 0 0 var(--danger); }
+.cloud-msg.warn { box-shadow: inset 3px 0 0 var(--warn); }
+
 .chart .line-a, .chart .line-v { fill: none; stroke-linecap: round; stroke-linejoin: round; }
 .chart .line-a { stroke: var(--text); stroke-width: 1.5; stroke-dasharray: 4 4; opacity: .85; }
 .chart .line-v { stroke: var(--accent); stroke-width: 2.5; }
