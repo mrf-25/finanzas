@@ -8,7 +8,7 @@
 const KEY = 'finanzas.data';
 const KEY_BAK = 'finanzas.data.bak';
 const VERSION = 2;
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const DEFAULT_INFLATION = 2.5; // % anual, editable en Inversiones
 
 const INV_OUT = 'inv-out'; // categoría de sistema: aportación a inversión (gasto)
@@ -113,7 +113,13 @@ function load() {
 
 let db = load();
 
+// Guarda en el dispositivo y, si hay cuenta conectada, programa la subida a la nube.
 function save() {
+  const ok = persist();
+  if (ok && window.Sync) Sync.schedule();
+  return ok;
+}
+function persist() {
   try {
     const prev = localStorage.getItem(KEY);
     if (prev) localStorage.setItem(KEY_BAK, prev); // la copia anterior siempre es legible: load() aparta las que no
@@ -806,8 +812,9 @@ function setInvValue(inv, value, est) {
   inv.valueDate = todayISO();
   const ym = curYM();
   const s = db.snaps.find(x => x.inv === inv.id && x.ym === ym);
-  if (s) { s.value = value; if (!est) delete s.est; }
-  else db.snaps.push({ id: uid(), inv: inv.id, ym, value, ...(est ? { est: true } : {}) });
+  // t: cuándo se apuntó; si dos dispositivos apuntan el mismo mes, queda el último.
+  if (s) { s.value = value; s.t = Date.now(); if (!est) delete s.est; }
+  else db.snaps.push({ id: uid(), inv: inv.id, ym, value, t: Date.now(), ...(est ? { est: true } : {}) });
 }
 const hasMonthValue = inv => db.snaps.some(s => s.inv === inv.id && s.ym === curYM() && !s.est);
 const invsMissing = () => db.invs.filter(i => !i.archived && !hasMonthValue(i));
@@ -1079,9 +1086,11 @@ const BACKUP_DAYS = 30;
 function backupDue() {
   const hasData = db.movs.length || db.pend.length || db.invs.length;
   if (!hasData) return false;
+  if (Sync.session) return false; // con cuenta conectada, la nube ya guarda la copia
+
   return !db.lastBackup || Date.now() - db.lastBackup > BACKUP_DAYS * 864e5;
 }
-function updateBackupDot() { $('#backupDot').hidden = !backupDue(); }
+function updateBackupDot() { $('#backupDot').hidden = !backupDue() && Sync.state !== 'login' && Sync.state !== 'outdated'; }
 
 function renderSet() {
   calm();
@@ -1092,9 +1101,11 @@ function renderSet() {
     ${backupDue() ? `<div class="banner">${db.lastBackup ? `Tu última copia es del ${esc(new Date(db.lastBackup).toLocaleDateString('es-ES'))}.` : 'Aún no has hecho ninguna copia.'} Exporta una ahora para no perder tus datos.</div>` : ''}
     <div class="cols three">
     <div class="col">
+    <h2>Cuenta y nube</h2>
+    <div class="card cloud" id="cloud">${cloudCard()}</div>
     <h2>Copia de seguridad</h2>
     <div class="card">
-      <p class="small muted" style="margin-top:0">Los datos solo están en este dispositivo. Guarda la copia en Archivos o iCloud Drive.</p>
+      <p class="small muted" style="margin-top:0">${Sync.session ? 'Tus datos están en este dispositivo y en tu cuenta. Si quieres, guarda además una copia en Archivos o iCloud Drive.' : 'Los datos solo están en este dispositivo. Guarda la copia en Archivos o iCloud Drive.'}</p>
       <button class="btn" id="exp">Exportar copia</button>
       <button class="btn secondary" id="imp">Importar copia</button>
       <input type="file" id="impFile" accept="application/json,.json" hidden>
@@ -1114,6 +1125,7 @@ function renderSet() {
     </div>
     <p class="small muted" style="margin-top:24px">Versión ${APP_VERSION} · ${db.movs.length} movimientos guardados</p>`;
 
+  bindCloud();
   $('#exp').onclick = exportData;
   $('#imp').onclick = () => $('#impFile').click();
   $('#impFile').onchange = e => { const f = e.target.files[0]; if (f) importData(f); e.target.value = ''; };
@@ -1161,10 +1173,10 @@ async function exportData() {
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       await navigator.share({ files: [file], title: name });
       done();
-      return;
+      return true;
     }
   } catch (e) {
-    if (e.name === 'AbortError') return; // el usuario cerró la hoja
+    if (e.name === 'AbortError') return false; // el usuario cerró la hoja
   }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(file);
@@ -1173,13 +1185,14 @@ async function exportData() {
   a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   done();
+  return true;
 }
 
 async function importData(f) {
   try {
     const d = migrate(JSON.parse(await f.text()));
     if (!validShape(d)) throw new Error('El archivo no es una copia de esta app');
-    const msg = `La copia tiene ${d.movs.length} movimientos, ${d.pend.length} pendientes y ${d.invs.length} inversiones.\n\nSustituirá los datos actuales (${db.movs.length} movimientos). ¿Continuar?`;
+    const msg = `La copia tiene ${d.movs.length} movimientos, ${d.pend.length} pendientes y ${d.invs.length} inversiones.\n\nSustituirá los datos actuales (${db.movs.length} movimientos)${Sync.session ? ', también en tu cuenta y en tus otros dispositivos' : ''}. ¿Continuar?`;
     if (!confirm(msg)) return;
     db = d;
     save();
@@ -1189,6 +1202,146 @@ async function importData(f) {
     alert('No se pudo importar: ' + e.message);
   }
 }
+
+/* =========================================================
+   Cuenta y nube (la sincronización está en sync.js)
+   ========================================================= */
+
+const COLLECTIONS = ['movs', 'cats', 'pend', 'invs', 'snaps'];
+
+// Aplica los datos que llegan de la nube sin cambiar los objetos de sitio:
+// si hay una hoja abierta editando un movimiento, sigue apuntando al mismo.
+function adopt(next) {
+  for (const c of COLLECTIONS) {
+    const old = new Map(db[c].map(x => [x.id, x]));
+    db[c] = next[c].map(n => {
+      const o = old.get(n.id);
+      if (!o) return n;
+      for (const k of Object.keys(o)) if (!(k in n)) delete o[k];
+      return Object.assign(o, n);
+    });
+  }
+  db.cfg = Object.assign(db.cfg, next.cfg);
+  db.lastBackup = next.lastBackup;
+  db.version = next.version;
+}
+
+// Redibuja con lo que llegue de la nube, pero no mientras escribes en un campo.
+let renderLater = false;
+const typing = () => { const a = document.activeElement; return !!a && $('#view').contains(a) && a.matches('input, textarea, select'); };
+function refreshView() {
+  if (typing()) { renderLater = true; return; }
+  render();
+}
+$('#view').addEventListener('focusout', () => setTimeout(() => {
+  if (renderLater && !typing()) { renderLater = false; render(); }
+}, 0));
+
+function ago(t) {
+  const s = (Date.now() - t) / 1000;
+  if (s < 60) return 'hace un momento';
+  if (s < 3600) return `hace ${Math.floor(s / 60)} min`;
+  const d = new Date(t);
+  if (d.toDateString() === new Date().toDateString()) return `hoy a las ${d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}`;
+  return `el ${d.toLocaleDateString('es-ES')}`;
+}
+
+function cloudCard() {
+  const st = Sync.state;
+  if (!Sync.session) {
+    return `
+      ${st === 'login' ? `<p class="cloud-msg warn">${esc(Sync.message)}</p>` : ''}
+      <p class="small muted" style="margin-top:0">Conecta una cuenta para ver tus datos también en el ordenador y no perderlos si cambias de móvil. Sin cuenta, todo sigue solo en este dispositivo.</p>
+      <button class="btn" id="cConnect">${st === 'login' ? 'Volver a entrar' : 'Conectar cuenta'}</button>`;
+  }
+  const line = {
+    syncing: 'Sincronizando…',
+    ok: Sync.lastSync ? `Sincronizado ${ago(Sync.lastSync)}` : 'Conectado',
+  }[st] || Sync.message;
+  const tone = { ok: 'ok', syncing: 'busy', offline: 'warn', error: 'bad', outdated: 'bad' }[st] || 'warn';
+  return `
+    <div class="cloud-row">
+      <span class="cloud-dot ${tone}" aria-hidden="true"></span>
+      <div class="main"><div class="t">${esc(Sync.session.user.email || 'Cuenta conectada')}</div><div class="small muted" id="cLine">${esc(line)}</div></div>
+    </div>
+    <button class="btn secondary" id="cSync"${st === 'syncing' ? ' disabled' : ''}>Sincronizar ahora</button>
+    <button class="link" id="cOut">Cerrar sesión</button>`;
+}
+
+function bindCloud() {
+  const c = $('#cConnect'), s = $('#cSync'), o = $('#cOut');
+  if (c) c.onclick = connectSheet;
+  if (s) s.onclick = () => Sync.sync();
+  if (o) o.onclick = () => {
+    if (!confirm('Los datos se quedan en este dispositivo, pero dejarán de sincronizarse con tu cuenta. ¿Cerrar sesión?')) return;
+    Sync.signOut();
+    render();
+  };
+}
+
+function updateCloud() {
+  updateBackupDot();
+  const el = $('#cloud');
+  if (!el) return;
+  el.innerHTML = cloudCard();
+  bindCloud();
+}
+
+function connectSheet() {
+  openSheet(`
+    <h3>Conectar cuenta</h3>
+    <p class="small muted" style="margin-top:0">Usa el mismo email y contraseña en el móvil y en el ordenador. La primera vez, pulsa Crear cuenta.</p>
+    <form id="aForm" novalidate>
+      <label class="field"><span>Email</span><input id="aEmail" type="email" autocomplete="username" inputmode="email" autocapitalize="off" autocorrect="off" spellcheck="false" required></label>
+      <label class="field"><span>Contraseña</span><input id="aPass" type="password" autocomplete="current-password" minlength="6" required></label>
+      <p class="cloud-msg bad" id="aErr" role="alert" hidden></p>
+      <button class="btn" id="aIn" type="submit">Entrar</button>
+      <button class="btn secondary" id="aUp" type="button">Crear cuenta</button>
+    </form>`, sh => {
+    const email = sh.querySelector('#aEmail'), pass = sh.querySelector('#aPass'), err = sh.querySelector('#aErr');
+    const bIn = sh.querySelector('#aIn'), bUp = sh.querySelector('#aUp');
+    const say = (msg, tone = 'bad') => { err.className = 'cloud-msg ' + tone; err.textContent = msg; err.hidden = !msg; };
+    const run = async mode => {
+      const e = email.value.trim(), p = pass.value;
+      if (!e || !e.includes('@')) { say('Escribe tu email.'); email.focus(); return; }
+      if (p.length < 6) { say('La contraseña tiene que tener al menos 6 caracteres.'); pass.focus(); return; }
+      say('');
+      bIn.disabled = bUp.disabled = true;
+      const label = (mode === 'up' ? bUp : bIn), txt = label.textContent;
+      label.textContent = mode === 'up' ? 'Creando…' : 'Entrando…';
+      const r = mode === 'up' ? await Sync.signUp(e, p) : await Sync.signIn(e, p);
+      bIn.disabled = bUp.disabled = false;
+      label.textContent = txt;
+      if (!r.ok) { say(r.error, r.confirm ? 'warn' : 'bad'); return; }
+      if (document.activeElement) document.activeElement.blur();
+      if (Sync.needsFirstBackup()) firstUpload(sh);
+      else { Sync.start(); closeSheet(); render(); toast('Cuenta conectada'); }
+    };
+    sh.querySelector('#aForm').onsubmit = ev => { ev.preventDefault(); run('in'); };
+    bUp.onclick = () => { pass.autocomplete = 'new-password'; run('up'); };
+  });
+}
+
+// Primera subida desde un dispositivo con datos: antes se ofrece exportar una copia.
+function firstUpload(sh) {
+  sh.innerHTML = `
+    <h3>Antes de subir tus datos</h3>
+    <p class="small muted" style="margin-top:0">Se van a guardar en tu cuenta ${db.movs.length} movimientos, ${db.pend.length} pendientes y ${db.invs.length} inversiones. Si en la cuenta ya hay datos de otro dispositivo, se juntan: no se borra nada.</p>
+    <p class="small muted">Por si acaso, exporta antes una copia en un archivo.</p>
+    <button class="btn" id="fExp">Exportar copia y subir</button>
+    <button class="btn secondary" id="fGo">Subir sin exportar</button>`;
+  const done = () => { Sync.start(); closeSheet(); render(); toast('Cuenta conectada'); };
+  sh.querySelector('#fExp').onclick = async () => { if (await exportData()) done(); };
+  sh.querySelector('#fGo').onclick = done;
+}
+
+Sync.init({
+  get: () => db,
+  set: next => { adopt(next); persist(); refreshView(); },
+  migrate: d => migrate(d),
+  version: VERSION,
+  onState: () => { if (state.tab === 'set') updateCloud(); else updateBackupDot(); },
+});
 
 /* =========================================================
    Arranque
