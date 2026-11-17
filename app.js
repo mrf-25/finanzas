@@ -8,7 +8,7 @@
 const KEY = 'finanzas.data';
 const KEY_BAK = 'finanzas.data.bak';
 const VERSION = 2;
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const DEFAULT_INFLATION = 2.5; // % anual, editable en Inversiones
 
 const INV_OUT = 'inv-out'; // categoría de sistema: aportación a inversión (gasto)
@@ -178,7 +178,118 @@ const catName = id => (catById(id) || { name: 'Sin categoría' }).name;
 const activeCats = type => db.cats.filter(c => c.type === type && !c.archived && !c.system);
 
 /* =========================================================
-   Aviso inferior (toast) con deshacer
+   Movimiento: entradas, cifras que cuentan y confeti.
+   Todo es decorativo: nada bloquea ni retrasa lo que se toca.
+   ========================================================= */
+
+const REDUCE = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+const EASE_OUT = 'cubic-bezier(0.23, 1, 0.32, 1)';
+const EASE_DRAWER = 'cubic-bezier(0.32, 0.72, 0, 1)';
+
+function motion(el, frames, opts) {
+  if (REDUCE || !el || !el.animate) return null;
+  return el.animate(frames, opts);
+}
+
+// Cifra que cuenta desde cero al entrar en una pantalla.
+const num = (c, signed) => `<span data-n="${c}"${signed ? ' data-s="1"' : ''}>${signed ? fmtSigned(c) : fmt(c)}</span>`;
+function countUp(root) {
+  if (REDUCE) return;
+  root.querySelectorAll('[data-n]').forEach(el => {
+    const to = Number(el.dataset.n);
+    if (!to) return;
+    const f = el.dataset.s === '1' ? fmtSigned : fmt;
+    const t0 = performance.now(), dur = 900;
+    const tick = now => {
+      if (!el.isConnected) return;
+      const p = Math.min(1, (now - t0) / dur);
+      el.textContent = f(p < 1 ? Math.round(to * (1 - Math.pow(1 - p, 4))) : to);
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    el.textContent = f(0);
+    requestAnimationFrame(tick);
+  });
+}
+
+// Anima la entrada del contenido de la pantalla (cls: enter, slide-l o slide-r).
+let enterTimer;
+function enter(cls) {
+  const v = $('#view');
+  const off = () => v.classList.remove('enter', 'slide-l', 'slide-r');
+  off();
+  if (REDUCE) return;
+  void v.offsetWidth; // reinicia las animaciones
+  v.classList.add(cls);
+  countUp(v);
+  clearTimeout(enterTimer);
+  enterTimer = setTimeout(off, 1800);
+}
+// Al volver a pintar una pantalla (p. ej. tras pulsar una tecla) no se repite la entrada.
+// Se quita aquí y no al tocar: si se quitara al tocar, todo saltaría a su sitio bajo
+// el dedo y el toque acabaría en otro botón.
+const calm = () => $('#view').classList.remove('enter', 'slide-l', 'slide-r');
+
+// Confeti en amarillo, blanco y gris desde un punto de la pantalla.
+const fx = { parts: [], raf: 0 };
+function burst(x, y, n, power) {
+  const cv = $('#fx');
+  if (REDUCE || !cv || !cv.getContext) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  if (cv.width !== Math.round(innerWidth * dpr) || cv.height !== Math.round(innerHeight * dpr)) {
+    cv.width = Math.round(innerWidth * dpr); cv.height = Math.round(innerHeight * dpr);
+  }
+  const colors = ['#ffdd00', '#ffdd00', '#ffffff', '#fff3a0', '#8a8a8a'];
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.5;
+    const v = (5 + Math.random() * 9) * power;
+    fx.parts.push({
+      x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 2 * power,
+      w: 5 + Math.random() * 6, h: 3 + Math.random() * 5, r: Math.random() * 6.3, vr: (Math.random() - 0.5) * 0.5,
+      c: colors[i % colors.length], life: 0, max: 50 + Math.random() * 40 * power, round: i % 4 === 0,
+    });
+  }
+  if (fx.raf) return;
+  const ctx = cv.getContext('2d');
+  const step = () => {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    fx.parts = fx.parts.filter(q => q.life < q.max);
+    for (const q of fx.parts) {
+      q.life++; q.vy += 0.42; q.vx *= 0.985; q.vy *= 0.985; q.x += q.vx; q.y += q.vy; q.r += q.vr;
+      ctx.globalAlpha = Math.min(1, (q.max - q.life) / 18);
+      ctx.fillStyle = q.c;
+      ctx.save(); ctx.translate(q.x, q.y); ctx.rotate(q.r);
+      if (q.round) { ctx.beginPath(); ctx.arc(0, 0, q.w / 2.2, 0, 6.3); ctx.fill(); }
+      else ctx.fillRect(-q.w / 2, -q.h / 2, q.w, q.h);
+      ctx.restore();
+    }
+    fx.raf = fx.parts.length ? requestAnimationFrame(step) : 0;
+    if (!fx.raf) ctx.clearRect(0, 0, innerWidth, innerHeight);
+  };
+  fx.raf = requestAnimationFrame(step);
+}
+
+// iOS solo aplica :active a los botones si hay un listener táctil en el documento.
+document.addEventListener('touchstart', () => {}, { passive: true });
+
+const initial = s => (String(s || '').trim().charAt(0) || '·').toUpperCase();
+
+// Selector de dos opciones con pastilla deslizante.
+const seg = (id, a, b, cur) => `
+    <div class="seg" id="${id}" data-on="${cur === b[0] ? 1 : 0}"><i class="thumb"></i>
+      <button data-t="${a[0]}" class="${cur === a[0] ? 'on' : ''}">${a[1]}</button>
+      <button data-t="${b[0]}" class="${cur === b[0] ? 'on' : ''}">${b[1]}</button>
+    </div>`;
+// Tras repintar, la pastilla se desliza desde donde estaba.
+function slideSeg(id, from) {
+  const el = $('#' + id);
+  if (!el) return;
+  const to = Number(el.dataset.on);
+  if (from !== to) motion(el.querySelector('.thumb'), [{ transform: `translateX(${from * 100}%)` }, { transform: `translateX(${to * 100}%)` }], { duration: 360, easing: EASE_DRAWER });
+}
+
+/* =========================================================
+   Aviso superior (toast) con deshacer
    ========================================================= */
 
 let toastTimer;
@@ -191,34 +302,57 @@ function toast(msg, actionLabel, action) {
     b.onclick = () => { hideToast(); action(); };
     t.appendChild(b);
   }
+  toastSeq++;
   t.hidden = false;
+  motion(t, [{ opacity: 0, transform: 'translateY(-130%) scale(0.94)' }, { opacity: 1, transform: 'none' }], { duration: 460, easing: EASE_DRAWER });
   clearTimeout(toastTimer);
   toastTimer = setTimeout(hideToast, actionLabel ? 6000 : 2500);
 }
-function hideToast() { $('#toast').hidden = true; }
+let toastSeq = 0;
+function hideToast() {
+  const t = $('#toast');
+  if (t.hidden) return;
+  const id = toastSeq;
+  const a = motion(t, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-60%)' }], { duration: 180, easing: 'ease-in', fill: 'forwards' });
+  const done = () => { if (a) a.cancel(); if (id === toastSeq) t.hidden = true; };
+  if (a) a.onfinish = done; else done();
+}
 
 /* =========================================================
    Hoja inferior genérica
    ========================================================= */
 
+let sheetTimer;
 function openSheet(html, bind) {
   const bd = $('#sheetBackdrop');
   const sh = $('#sheet');
+  clearTimeout(sheetTimer);
+  bd.classList.remove('closing');
   sh.innerHTML = html;
+  sh.scrollTop = 0;
   bd.hidden = false;
   bd.onclick = e => { if (e.target === bd) closeSheet(); };
   // Con teclado físico: Intro en un campo pulsa el botón principal de la hoja.
   sh.onkeydown = e => {
-    if (e.key !== 'Enter' || !e.target.matches('input')) return;
+    if (e.key !== 'Enter' || !e.target.matches('input') || bd.classList.contains('closing')) return;
     const b = sh.querySelector(e.target.dataset.enter || '.btn:not(.secondary):not(.danger)');
     if (b) { e.preventDefault(); b.click(); }
   };
   bind && bind(sh);
 }
 function closeSheet() {
-  $('#sheetBackdrop').hidden = true;
-  $('#sheet').innerHTML = '';
+  const bd = $('#sheetBackdrop');
+  if (bd.hidden || bd.classList.contains('closing')) return;
+  const end = () => { bd.hidden = true; bd.classList.remove('closing'); $('#sheet').innerHTML = ''; };
+  if (document.activeElement && bd.contains(document.activeElement)) document.activeElement.blur();
+  if (REDUCE) { end(); return; }
+  bd.classList.add('closing'); // mientras sale no admite toques (ver styles.css)
+  sheetTimer = setTimeout(end, 200);
 }
+// Mientras la hoja se cierra no atiende más pulsaciones: evita guardar dos veces con un doble toque.
+$('#sheet').addEventListener('click', e => {
+  if ($('#sheetBackdrop').classList.contains('closing')) { e.stopPropagation(); e.preventDefault(); }
+}, true);
 
 function catOptions(type, selected) {
   return db.cats
@@ -244,11 +378,14 @@ const state = {
 
 const views = { add: renderAdd, month: renderMonth, pend: renderPend, inv: renderInv, set: renderSet };
 
+const TABS = ['add', 'month', 'pend', 'inv', 'set'];
 function go(tab) {
   state.tab = tab;
   document.querySelectorAll('.tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  $('#tabbar').style.setProperty('--i', TABS.indexOf(tab));
   render();
   window.scrollTo(0, 0);
+  enter('enter');
 }
 function render() {
   $('#view').dataset.tab = state.tab;
@@ -263,17 +400,15 @@ document.querySelectorAll('.tabbar button').forEach(b => b.addEventListener('cli
    ========================================================= */
 
 function renderAdd() {
+  calm();
   const cents = parseAmount(state.amount || '0');
   const has = state.amount !== '' && cents > 0;
   const shown = state.amount === '' ? '0' : state.amount;
   const isToday = state.date === todayISO();
   $('#view').innerHTML = `
-    <div class="seg" id="typeSeg">
-      <button data-t="gasto" class="${state.addType === 'gasto' ? 'on' : ''}">Gasto</button>
-      <button data-t="ingreso" class="${state.addType === 'ingreso' ? 'on' : ''}">Ingreso</button>
-    </div>
-    <div class="amount ${has ? '' : 'empty'}" id="amount"><span class="sign">${state.addType === 'gasto' ? '−' : '+'}</span>${esc(shown)} €</div>
-    <div class="hint">${has ? 'Toca una categoría para guardar' : 'Escribe el importe'}${isToday ? '' : ' · ' + esc(dayLabel(state.date))}</div>
+    ${seg('typeSeg', ['gasto', 'Gasto'], ['ingreso', 'Ingreso'], state.addType)}
+    <div class="amount ${has ? '' : 'empty'} ${shown.length > 6 ? 'long' : ''}" id="amount"><span class="sign">${state.addType === 'gasto' ? '−' : '+'}</span>${esc(shown)} €</div>
+    <div class="hint ${has ? 'go' : ''}">${has ? 'Toca una categoría para guardar' : 'Escribe el importe'}${isToday ? '' : ' · ' + esc(dayLabel(state.date))}</div>
     <div class="meta-row">
       <input id="note" type="text" placeholder="Nota (opcional)" value="${esc(state.note)}" autocomplete="off" enterkeyhint="done">
       <input id="date" type="date" value="${state.date}" max="${todayISO()}" aria-label="Fecha">
@@ -282,14 +417,16 @@ function renderAdd() {
       ${activeCats(state.addType).map(c => `<button data-c="${c.id}">${esc(c.name)}</button>`).join('')}
     </div>
     <div class="keypad" id="keypad">
-      ${['1', '2', '3', '4', '5', '6', '7', '8', '9', ',', '0', '⌫'].map(k => `<button data-k="${k}" aria-label="${k === '⌫' ? 'Borrar' : k}">${k}</button>`).join('')}
+      ${['1', '2', '3', '4', '5', '6', '7', '8', '9', ',', '0', '⌫'].map(k => `<button data-k="${k}" aria-label="${k === '⌫' ? 'Borrar' : k}">${k === '⌫' ? '<svg viewBox="0 0 24 24"><path d="M9 6h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-6-6 6-6zM12 10l4 4M16 10l-4 4"/></svg>' : k}</button>`).join('')}
     </div>`;
 
   $('#typeSeg').onclick = e => {
     const t = e.target.closest('button');
     if (!t) return;
+    const from = state.addType === 'gasto' ? 0 : 1;
     state.addType = t.dataset.t;
     renderAdd();
+    slideSeg('typeSeg', from);
   };
   $('#note').oninput = e => { state.note = e.target.value; };
   $('#date').onchange = e => { state.date = e.target.value || todayISO(); renderAdd(); };
@@ -303,7 +440,8 @@ function renderAdd() {
     if (!b) return;
     const c = parseAmount(state.amount || '0');
     if (!(c > 0)) { toast('Primero escribe el importe'); return; }
-    addMov({ type: state.addType, amount: c, cat: b.dataset.c, note: state.note.trim(), date: state.date });
+    const r = b.getBoundingClientRect();
+    addMov({ type: state.addType, amount: c, cat: b.dataset.c, note: state.note.trim(), date: state.date }, { x: r.left + r.width / 2, y: r.top + r.height / 2 });
   };
 }
 
@@ -322,18 +460,21 @@ function pressKey(k) {
   const has = a !== '' && cents > 0;
   const el = $('#amount');
   el.classList.toggle('empty', !has);
+  el.classList.toggle('long', a.length > 6);
   el.innerHTML = `<span class="sign">${state.addType === 'gasto' ? '−' : '+'}</span>${esc(a === '' ? '0' : a)} €`;
+  if (k !== '⌫') motion(el, [{ transform: 'scale(1.05)' }, { transform: 'none' }], { duration: 180, easing: EASE_OUT });
   $('#cats').classList.toggle('disabled', !has);
   const isToday = state.date === todayISO();
-  document.querySelector('.hint').textContent =
-    (has ? 'Toca una categoría para guardar' : 'Escribe el importe') + (isToday ? '' : ' · ' + dayLabel(state.date));
+  const hint = document.querySelector('.hint');
+  hint.classList.toggle('go', has);
+  hint.textContent = (has ? 'Toca una categoría para guardar' : 'Escribe el importe') + (isToday ? '' : ' · ' + dayLabel(state.date));
 }
 
 // En el ordenador el importe también se puede escribir con el teclado.
 document.addEventListener('keydown', e => {
-  const sheetOpen = !$('#sheetBackdrop').hidden;
-  if (e.key === 'Escape' && sheetOpen) { closeSheet(); return; }
-  if (state.tab !== 'add' || sheetOpen || e.metaKey || e.ctrlKey || e.altKey) return;
+  const open = !$('#sheetBackdrop').hidden;
+  if (e.key === 'Escape' && open) { closeSheet(); return; }
+  if (state.tab !== 'add' || open || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
   if (/^\d$/.test(e.key)) pressKey(e.key);
   else if (e.key === ',' || e.key === '.') pressKey(',');
@@ -342,7 +483,7 @@ document.addEventListener('keydown', e => {
   e.preventDefault();
 });
 
-function addMov(m) {
+function addMov(m, from) {
   const mov = { id: uid(), created: Date.now(), ...m };
   db.movs.push(mov);
   if (!save()) { db.movs.pop(); return; }
@@ -350,6 +491,9 @@ function addMov(m) {
   state.note = '';
   state.date = todayISO();
   renderAdd();
+  // Confirmación visual: el importe se recoloca y salta un poco de confeti desde la categoría tocada.
+  motion($('#amount'), [{ transform: 'scale(0.82)', opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 420, easing: EASE_OUT });
+  if (from) burst(from.x, from.y, 18, 0.62);
   toast(`${m.type === 'gasto' ? 'Gasto' : 'Ingreso'} de ${fmt(m.amount)} en ${catName(m.cat)}`, 'Deshacer', () => {
     db.movs = db.movs.filter(x => x.id !== mov.id);
     save();
@@ -372,6 +516,7 @@ function monthTotals(ym) {
 }
 
 function renderMonth() {
+  calm();
   const ym = state.month;
   const cur = monthOf(todayISO());
   const t = monthTotals(ym);
@@ -394,11 +539,11 @@ function renderMonth() {
       <button class="icon-btn" id="nextM" aria-label="Mes siguiente" ${ym >= cur ? 'disabled' : ''}>›</button>
     </div>
 
-    <div class="card balance">
-      <div class="lbl">Balance del mes</div><div></div>
-      <div class="big num">${fmtSigned(t.bal)}</div>
-      <div><div class="lbl"><i class="sw" style="background:var(--ingreso)"></i>Ingresos</div><div class="val num">${fmt(t.ing)}</div></div>
-      <div><div class="lbl"><i class="sw" style="background:var(--gasto)"></i>Gastos</div><div class="val num">${fmt(t.gas)}</div></div>
+    <div class="hero bal">
+      <div class="lbl">Balance del mes</div>
+      <div class="big num">${num(t.bal, true)}</div>
+      <div class="chip"><span>Ingresos</span><b>${num(t.ing)}</b></div>
+      <div class="chip"><span>Gastos</span><b>${num(t.gas)}</b></div>
     </div>
 
     <div class="cols">
@@ -411,45 +556,48 @@ function renderMonth() {
 
     <h2>Gasto por categoría</h2>
     <div class="card catbars">
-      ${catRows.length ? catRows.map(([id, v]) => `
+      ${catRows.length ? catRows.map(([id, v], i) => `
         <div class="item">
           <div class="row"><span>${esc(catName(id))}</span><span class="num">${fmt(v)} <span class="muted small">${Math.round(v / t.gas * 100)} %</span></span></div>
-          <div class="track"><div class="fill" style="width:${Math.max(2, v / maxCat * 100)}%"></div></div>
+          <div class="track"><div class="fill" style="width:${Math.max(2, v / maxCat * 100)}%;--i:${i}"></div></div>
         </div>`).join('') : '<div class="muted">Sin gastos este mes.</div>'}
     </div>
 
     </div>
     <div class="col">
     <h2>Movimientos</h2>
-    <div class="seg" id="listSeg">
-      <button data-t="gasto" class="${state.listType === 'gasto' ? 'on' : ''}">Gastos</button>
-      <button data-t="ingreso" class="${state.listType === 'ingreso' ? 'on' : ''}">Ingresos</button>
-    </div>
+    ${seg('listSeg', ['gasto', 'Gastos'], ['ingreso', 'Ingresos'], state.listType)}
     <div class="list" id="movList">
       ${list.length ? list.map(m => `
         <button class="li" data-id="${m.id}">
+          <span class="av${m.inv ? ' inv' : ''}">${esc(initial(catName(m.cat)))}</span>
           <div class="main"><div class="t">${esc(catName(m.cat))}</div><div class="s">${esc(dayLabel(m.date))}${m.note ? ' · ' + esc(m.note) : ''}</div></div>
-          <div class="a">${m.type === 'gasto' ? '−' : '+'}${fmt(m.amount)}</div>
+          <div class="a${m.type === 'ingreso' ? ' pos' : ''}">${m.type === 'gasto' ? '−' : '+'}${fmt(m.amount)}</div>
         </button>`).join('') : `<div class="empty-state">No hay ${state.listType === 'gasto' ? 'gastos' : 'ingresos'} este mes.</div>`}
     </div>
     </div>
     </div>`;
 
-  $('#prevM').onclick = () => { state.month = shiftMonth(ym, -1); renderMonth(); };
-  $('#nextM').onclick = () => { state.month = shiftMonth(ym, 1); renderMonth(); };
+  $('#prevM').onclick = () => { state.month = shiftMonth(ym, -1); renderMonth(); enter('slide-l'); };
+  $('#nextM').onclick = () => { state.month = shiftMonth(ym, 1); renderMonth(); enter('slide-r'); };
   $('#listSeg').onclick = e => {
     const b = e.target.closest('button');
     if (!b) return;
+    const from = state.listType === 'gasto' ? 0 : 1;
     state.listType = b.dataset.t;
     renderMonth();
+    slideSeg('listSeg', from);
   };
   $('#movList').onclick = e => {
     const b = e.target.closest('.li');
     if (b) editMov(b.dataset.id);
   };
   document.querySelectorAll('.chart [data-m]').forEach(r => r.addEventListener('click', () => {
+    if (r.dataset.m === ym) return;
+    const dir = r.dataset.m < ym ? 'slide-l' : 'slide-r';
     state.month = r.dataset.m;
     renderMonth();
+    enter(dir);
   }));
 }
 
@@ -462,26 +610,21 @@ function barChart(ym) {
   const W = 340, H = 170, top = 10, bottom = 22, left = 4, right = 4;
   const ph = H - top - bottom;
   const slot = (W - left - right) / months.length;
-  const bw = Math.min(16, slot / 2 - 5);
+  const bw = Math.min(14, slot / 2 - 5);
   const y = v => top + ph - (v / max) * ph;
-  const r = 4;
-  // Barra con esquinas redondeadas solo arriba, apoyada en la base
-  const bar = (x, v, cls) => {
+  // Barra en forma de píldora apoyada en la base
+  const bar = (x, v, cls, i) => {
     if (v <= 0) return '';
-    const h = Math.max(2, (v / max) * ph);
-    const rr = Math.min(r, h, bw / 2);
-    const yb = top + ph;
-    return `<path class="${cls}" d="M${x},${yb} V${yb - h + rr} Q${x},${yb - h} ${x + rr},${yb - h} H${x + bw - rr} Q${x + bw},${yb - h} ${x + bw},${yb - h + rr} V${yb} Z"/>`;
+    const h = Math.max(4, (v / max) * ph);
+    return `<rect class="${cls}" style="--i:${i}" x="${x}" y="${top + ph - h}" width="${bw}" height="${h}" rx="${Math.min(bw / 2, h / 2)}"/>`;
   };
   let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Ingresos y gastos de los últimos seis meses">`;
-  [0.5, 1].forEach(f => { svg += `<line class="grid" x1="${left}" x2="${W - right}" y1="${y(max * f)}" y2="${y(max * f)}"/>`; });
-  svg += `<line class="grid" x1="${left}" x2="${W - right}" y1="${top + ph}" y2="${top + ph}"/>`;
   data.forEach((d, i) => {
     const cx = left + slot * i + slot / 2;
-    if (d.m === ym) svg += `<rect class="sel" x="${cx - slot / 2 + 2}" y="${top - 6}" width="${slot - 4}" height="${ph + 6 + bottom}" rx="8"/>`;
-    svg += bar(cx - bw - 1, d.ing, 'bar-i');
-    svg += bar(cx + 1, d.gas, 'bar-g');
-    svg += `<text class="axis" x="${cx}" y="${H - 6}" text-anchor="middle">${esc(monthLabel(d.m, { month: 'short' }).replace('.', ''))}</text>`;
+    if (d.m === ym) svg += `<rect class="sel" x="${cx - slot / 2 + 3}" y="${top - 6}" width="${slot - 6}" height="${ph + 6 + bottom}" rx="14"/>`;
+    svg += bar(cx - bw - 1.5, d.ing, 'bar-i', i);
+    svg += bar(cx + 1.5, d.gas, 'bar-g', i);
+    svg += `<text class="axis${d.m === ym ? ' on' : ''}" x="${cx}" y="${H - 6}" text-anchor="middle">${esc(monthLabel(d.m, { month: 'short' }).replace('.', ''))}</text>`;
     svg += `<rect class="hit" data-m="${d.m}" x="${cx - slot / 2}" y="0" width="${slot}" height="${H}"><title>${esc(monthLabel(d.m))}: ingresos ${fmt(d.ing)}, gastos ${fmt(d.gas)}, balance ${fmtSigned(d.bal)}</title></rect>`;
   });
   svg += `<text class="axis" x="${left}" y="${y(max) - 2}" font-size="10">${esc(fmt(max).replace(/,00/, ''))}</text>`;
@@ -529,21 +672,23 @@ function editMov(id) {
    ========================================================= */
 
 function renderPend() {
+  calm();
   const open = db.pend.filter(p => !p.settled).sort((a, b) => b.date.localeCompare(a.date));
   const done = db.pend.filter(p => p.settled).sort((a, b) => b.settled.localeCompare(a.settled)).slice(0, 10);
   const meDeben = open.filter(p => p.dir === 'meDeben').reduce((s, p) => s + p.amount, 0);
   const debo = open.filter(p => p.dir === 'debo').reduce((s, p) => s + p.amount, 0);
   const item = p => `
     <button class="li" data-id="${p.id}">
+      <span class="av">${esc(initial(p.person))}</span>
       <div class="main"><div class="t">${esc(p.person)}</div><div class="s">${esc([p.reason, p.method, dayLabel(p.date)].filter(Boolean).join(' · '))}</div></div>
-      <div class="a">${p.dir === 'meDeben' ? '+' : '−'}${fmt(p.amount)}</div>
+      <div class="a${p.dir === 'meDeben' ? ' pos' : ''}">${p.dir === 'meDeben' ? '+' : '−'}${fmt(p.amount)}</div>
     </button>`;
   $('#view').innerHTML = `
     <h1>Pendiente</h1>
     <div class="head">
     <div class="card">
-      <div class="stat"><span>Te deben</span><b>${fmt(meDeben)}</b></div>
-      <div class="stat"><span>Debes</span><b>${fmt(debo)}</b></div>
+      <div class="stat"><span>Te deben</span><b>${num(meDeben)}</b></div>
+      <div class="stat"><span>Debes</span><b>${num(debo)}</b></div>
     </div>
     <button class="btn" id="newPend">Añadir pendiente</button>
     </div>
@@ -571,10 +716,7 @@ function editPend(id) {
   const isNew = !id;
   openSheet(`
     <h3>${isNew ? 'Nuevo pendiente' : p.settled ? 'Pendiente saldado' : 'Pendiente'}</h3>
-    <div class="seg" id="pDir">
-      <button data-d="meDeben" class="${p.dir === 'meDeben' ? 'on' : ''}">Me deben</button>
-      <button data-d="debo" class="${p.dir === 'debo' ? 'on' : ''}">Debo</button>
-    </div>
+    ${seg('pDir', ['meDeben', 'Me deben'], ['debo', 'Debo'], p.dir)}
     <label class="field"><span>Persona</span><input id="pPerson" value="${esc(p.person)}" autocomplete="off"></label>
     <label class="field"><span>Importe (€)</span><input id="pAmt" inputmode="decimal" value="${p.amount ? centsToInput(p.amount) : ''}"></label>
     <label class="field"><span>Motivo</span><input id="pReason" value="${esc(p.reason)}" placeholder="Cena, entradas…"></label>
@@ -588,8 +730,9 @@ function editPend(id) {
     sh.querySelector('#pDir').onclick = e => {
       const b = e.target.closest('button');
       if (!b) return;
-      dir = b.dataset.d;
+      dir = b.dataset.t;
       sh.querySelectorAll('#pDir button').forEach(x => x.classList.toggle('on', x === b));
+      sh.querySelector('#pDir').dataset.on = dir === 'debo' ? 1 : 0;
     };
     const read = () => {
       const amount = parseAmount(sh.querySelector('#pAmt').value);
@@ -638,6 +781,7 @@ function settlePend(p) {
       if (withMov) db.movs.push({ id: uid(), created: Date.now(), type, amount: p.amount, cat: sh.querySelector('#sCat').value, note: [p.person, p.reason].filter(Boolean).join(' · '), date: todayISO(), pend: p.id });
       save(); closeSheet(); render();
       toast('Saldado');
+      burst(innerWidth / 2, innerHeight * 0.4, 60, 1);
     };
     sh.querySelector('#sYes').onclick = () => finish(true);
     sh.querySelector('#sNo').onclick = () => finish(false);
@@ -673,13 +817,14 @@ function invStats(inv) {
 }
 
 const LIGHTS = {
-  verde: { icon: '✓', text: 'Vas bien: ganas a la inflación' },
-  ambar: { icon: '!', text: 'Ganas dinero, pero menos que la inflación' },
-  rojo: { icon: '↓', text: 'Tu inversión vale menos de lo aportado' },
+  verde: { icon: 'M5 12.5l4.5 4.5L19 7.5', text: 'Vas bien: ganas a la inflación' },
+  ambar: { icon: 'M12 6v7.5M12 17.6v.2', text: 'Ganas dinero, pero menos que la inflación' },
+  rojo: { icon: 'M12 5v14M6 13l6 6 6-6', text: 'Tu inversión vale menos de lo aportado' },
 };
 const rentTxt = r => (r === null ? '—' : pct.format(r));
 
 function renderInv() {
+  calm();
   const ym = curYM();
   const invs = db.invs.filter(i => !i.archived);
   const missing = invsMissing();
@@ -720,10 +865,11 @@ function renderInv() {
     <div class="cols">
       <div class="col">
         <h2>¿Voy bien?</h2>
-        <div class="card">
-          ${L ? `<div class="light ${t.luz}"><i aria-hidden="true">${L.icon}</i><span>${L.text}</span></div>` : ''}
-          <div class="lbl small muted">Ganancia real, descontada la inflación</div>
-          <div class="bigfig num">${fmtSigned(t.gananciaReal)} <span class="rent">${rentTxt(t.rentReal)}</span></div>
+        <div class="hero inv ${t.luz}">
+          <i class="glow"></i>
+          ${L ? `<div class="light"><span class="lamp" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="${L.icon}"/></svg></span><span>${L.text}</span></div>` : ''}
+          <div class="lbl">Ganancia real, descontada la inflación</div>
+          <div class="bigfig num">${num(t.gananciaReal, true)} <span class="rent">${rentTxt(t.rentReal)}</span></div>
           <div class="stat"><span>Aportado</span><b>${fmt(t.aportado)}</b></div>
           <div class="stat"><span>Valor actual</span><b>${fmt(t.valor)}</b></div>
           <div class="stat"><span>Ganancia</span><b>${fmtSigned(t.ganancia)} (${rentTxt(t.rentNominal)})</b></div>
@@ -750,6 +896,7 @@ function renderInv() {
           ${invs.map(i => {
             const st = invStats(i);
             return `<button class="li" data-id="${i.id}">
+              <span class="av inv">${esc(initial(i.name))}</span>
               <div class="main"><div class="t">${esc(i.name)}</div><div class="s">${hasMonthValue(i) ? `Valor a ${esc(dayLabel(i.valueDate))}` : `Falta el valor de ${esc(monthName(ym))}`} · aportado ${fmt(st.aportado)}</div></div>
               <div style="text-align:right"><div class="a">${fmt(i.value)}</div><div class="s small muted num">${fmtSigned(st.gananciaReal)} real</div></div>
             </button>`;
@@ -791,7 +938,8 @@ function lineChart(serie, selYm) {
   const y = v => top + ph - ((v - min) / (max - min)) * ph;
   const path = key => serie.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`).join(' ');
   const short = c => eur.format(c / 100).replace(/,00/, '');
-  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Evolución de lo aportado y del valor real">`;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Evolución de lo aportado y del valor real">
+    <defs><linearGradient id="gArea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffdd00" stop-opacity=".32"/><stop offset="1" stop-color="#ffdd00" stop-opacity="0"/></linearGradient></defs>`;
   [0, 0.5, 1].forEach(f => { const yy = top + ph - ph * f; svg += `<line class="grid" x1="${left}" x2="${W - right}" y1="${yy}" y2="${yy}"/>`; });
   svg += `<text class="axis" x="${left}" y="${top - 3}" font-size="10">${esc(short(max))}</text>`;
   svg += `<text class="axis" x="${left}" y="${top + ph - 4}" font-size="10">${esc(short(min))}</text>`;
@@ -799,11 +947,11 @@ function lineChart(serie, selYm) {
   const selI = serie.findIndex(p => p.ym === selYm);
   if (selI >= 0) svg += `<line class="selx" x1="${x(selI)}" x2="${x(selI)}" y1="${top}" y2="${top + ph}"/>`;
   // El valor real debajo y lo aportado encima, a trazos, para que se distingan cuando casi coinciden.
-  if (n > 1) svg += `<path class="line-v" d="${path('valorReal')}"/><path class="line-a" d="${path('aportado')}"/>`;
+  if (n > 1) svg += `<path class="area-v" d="${path('valorReal')} L${x(n - 1).toFixed(1)},${top + ph} L${x(0).toFixed(1)},${top + ph} Z"/><path class="line-v" pathLength="1" d="${path('valorReal')}"/><path class="line-a" d="${path('aportado')}"/>`;
   const every = Math.ceil(n / 6);
   serie.forEach((p, i) => {
-    if (n <= 12 || i === selI) svg += `<circle class="dot-v" cx="${x(i)}" cy="${y(p.valorReal)}" r="3.5"/><circle class="dot-a" cx="${x(i)}" cy="${y(p.aportado)}" r="2"/>`;
-    if ((n - 1 - i) % every === 0) svg += `<text class="axis" x="${x(i)}" y="${H - 6}" text-anchor="middle">${esc(monthLabel(p.ym, { month: 'short' }).replace('.', ''))}</text>`;
+    if (n <= 12 || i === selI) svg += `<circle class="dot-v" style="--i:${i}" cx="${x(i)}" cy="${y(p.valorReal)}" r="3.5"/><circle class="dot-a" style="--i:${i}" cx="${x(i)}" cy="${y(p.aportado)}" r="2"/>`;
+    if ((n - 1 - i) % every === 0) svg += `<text class="axis${i === selI ? ' on' : ''}" x="${x(i)}" y="${H - 6}" text-anchor="middle">${esc(monthLabel(p.ym, { month: 'short' }).replace('.', ''))}</text>`;
     svg += `<rect class="hit" data-m="${p.ym}" x="${x(i) - slot / 2}" y="0" width="${slot}" height="${H}"><title>${esc(monthLabel(p.ym))}: aportado ${fmt(p.aportado)}, valor real ${fmt(p.valorReal)}</title></rect>`;
   });
   return svg + '</svg>';
@@ -895,6 +1043,8 @@ function invSheet(id) {
       setInvValue(inv, val);
       if (!save()) { db = JSON.parse(before); return; }
       closeSheet(); render();
+      // Celebración solo cuando el apunte deja el semáforo en verde.
+      if (Calc.totals(db.invs, db.movs, curYM(), db.cfg.inflation).luz === 'verde') burst(innerWidth / 2, innerHeight * 0.38, 110, 1.25);
       toast(ap > 0 ? `Apuntado: ${fmt(ap)} aportados, valor ${fmt(val)}` : `Valor apuntado: ${fmt(val)}`, 'Deshacer', () => {
         db = JSON.parse(before); save(); render(); toast('Deshecho');
       });
@@ -934,6 +1084,7 @@ function backupDue() {
 function updateBackupDot() { $('#backupDot').hidden = !backupDue(); }
 
 function renderSet() {
+  calm();
   const catList = type => activeCats(type).map(c => `
     <button class="li" data-id="${c.id}"><div class="main"><div class="t">${esc(c.name)}</div></div><span class="muted">›</span></button>`).join('');
   $('#view').innerHTML = `
@@ -952,12 +1103,12 @@ function renderSet() {
     </div>
     <div class="col">
     <h2>Categorías de gasto</h2>
-    <div class="list catl">${catList('gasto')}</div>
+    <div class="list plain catl">${catList('gasto')}</div>
     <button class="link" data-add="gasto">+ Añadir categoría de gasto</button>
     </div>
     <div class="col">
     <h2>Categorías de ingreso</h2>
-    <div class="list catl">${catList('ingreso')}</div>
+    <div class="list plain catl">${catList('ingreso')}</div>
     <button class="link" data-add="ingreso">+ Añadir categoría de ingreso</button>
     </div>
     </div>
@@ -1056,3 +1207,4 @@ if ('serviceWorker' in navigator) {
 }
 
 render();
+enter('enter');
